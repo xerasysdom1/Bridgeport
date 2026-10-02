@@ -1,0 +1,7 @@
+.env
+data/
+models/*
+!models/.gitkeep
+__pycache__/
+*.py[cod]
+.pytest_cache/

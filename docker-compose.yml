@@ -1,0 +1,105 @@
+name: bridgeport
+
+services:
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+    restart: unless-stopped
+    ports:
+      # Redis is intentionally available only on the Raspberry Pi itself by default.
+      - "${REDIS_BIND_ADDRESS:-127.0.0.1}:6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  mqtt:
+    image: eclipse-mosquitto:2.0
+    restart: unless-stopped
+    ports:
+      # Set MQTT_BIND_ADDRESS=127.0.0.1 if all publishers run on this Pi.
+      - "${MQTT_BIND_ADDRESS:-0.0.0.0}:1883:1883"
+    volumes:
+      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - mqtt-data:/mosquitto/data
+      - mqtt-log:/mosquitto/log
+    healthcheck:
+      test: ["CMD-SHELL", "mosquitto_sub -h 127.0.0.1 -t '$$SYS/broker/uptime' -C 1 -W 3"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  camera:
+    build:
+      context: ./camera
+    restart: unless-stopped
+    init: true
+    depends_on:
+      redis:
+        condition: service_healthy
+    devices:
+      - "${CAMERA_DEVICE:-/dev/video0}:${CAMERA_DEVICE:-/dev/video0}"
+    volumes:
+      # The YOLO weights are intentionally kept outside the image so deployments
+      # can control exactly which reviewed model runs on the Pi.
+      - ./models:/models:ro
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      CAMERA_DEVICE: ${CAMERA_DEVICE:-/dev/video0}
+      CAMERA_ID: ${CAMERA_ID:-pi-camera-01}
+      MACHINE_ID: ${MACHINE_ID:-machine-01}
+      CAPTURE_WIDTH: ${CAPTURE_WIDTH:-1280}
+      CAPTURE_HEIGHT: ${CAPTURE_HEIGHT:-720}
+      CAPTURE_FPS: ${CAPTURE_FPS:-5}
+      YOLO_MODEL: ${YOLO_MODEL:-/models/yolo11n.pt}
+      YOLO_IMAGE_SIZE: ${YOLO_IMAGE_SIZE:-320}
+      YOLO_CONFIDENCE: ${YOLO_CONFIDENCE:-0.50}
+      PRESENCE_CONFIRM_FRAMES: ${PRESENCE_CONFIRM_FRAMES:-2}
+      ABSENCE_TIMEOUT_SECONDS: ${ABSENCE_TIMEOUT_SECONDS:-5}
+      PRESENCE_TTL_SECONDS: ${PRESENCE_TTL_SECONDS:-60}
+      EVENT_STREAM_MAXLEN: ${EVENT_STREAM_MAXLEN:-10000}
+      CAMERA_RECONNECT_SECONDS: ${CAMERA_RECONNECT_SECONDS:-5}
+
+  # Run explicitly once before the first camera start:
+  # docker compose --profile tools run --rm model-fetch
+  model-fetch:
+    build:
+      context: ./camera
+    profiles: ["tools"]
+    environment:
+      YOLO_MODEL: ${YOLO_MODEL:-/models/yolo11n.pt}
+    volumes:
+      - ./models:/models
+    entrypoint: ["python", "download_model.py"]
+
+  data-collector:
+    build:
+      context: ./data_collector
+    restart: unless-stopped
+    init: true
+    depends_on:
+      redis:
+        condition: service_healthy
+      mqtt:
+        condition: service_healthy
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      MQTT_HOST: mqtt
+      MQTT_PORT: "1883"
+      MQTT_TOPIC: sensors/#
+      COLLECTION_DIR: /data
+      REDIS_STREAMS: vision.events,rfid.events,barcode.events
+      DEFAULT_MACHINE_ID: ${MACHINE_ID:-machine-01}
+      USER_SESSION_TTL_SECONDS: ${USER_SESSION_TTL_SECONDS:-300}
+    volumes:
+      - ./data:/data
+
+volumes:
+  redis-data:
+  mqtt-data:
+  mqtt-log:

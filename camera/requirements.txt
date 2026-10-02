@@ -1,0 +1,2 @@
+redis==5.2.1
+ultralytics>=8.3,<9
